@@ -1,7 +1,7 @@
 # .github/workflows/auto-promote.yaml
-name: 🚀 Auto Promote (Template Driven)
+name: 🚀 Auto Promote (Dynamic Environment Mapping & Auto-Merge)
 
-# Triggers when a Pull Request is closed (merged) against the environment branches
+# Trigger only when a Pull Request is successfully merged (closed event)
 on:
   pull_request:
     types: [closed]
@@ -11,15 +11,17 @@ on:
       - uat
       - staging
       - production
+      - main
+      - release/**
 
 # Required permissions for the GitHub Actions bot
 permissions:
-  contents: write    # Allows git checkout, cherry-pick, and pushing a new branch
-  pull-requests: write # Allows creation of a new Pull Request
+  contents: write    
+  pull-requests: write 
 
 jobs:
   promote:
-    # Only runs if the closed PR WAS merged
+    # Only run if the PR was merged (not just closed)
     if: github.event.pull_request.merged == true
     runs-on: ubuntu-latest
 
@@ -27,7 +29,6 @@ jobs:
       - name: ⬇️ Checkout Repository (Full History)
         uses: actions/checkout@v4
         with:
-          # Fetch full history to work with target branches
           fetch-depth: 0
 
       - name: 🛠️ Install jq & GitHub CLI
@@ -36,7 +37,7 @@ jobs:
           sudo apt-get install -y jq gh
 
       # ----------------------------------------------------------------------
-      # 1. Load Environment Configuration
+      # 1. Load Environment Configuration (Logic Names)
       # ----------------------------------------------------------------------
       - name: ⚙️ Load Environment Configuration
         id: load-envs
@@ -46,57 +47,60 @@ jobs:
             echo "❌ File .github/environments.json does not exist! Please create it."
             exit 1
           fi
-          # Read the list of environments (e.g., sit uat staging production)
-          environments=$(jq -r '.environments | join(" ")' .github/environments.json)
-          echo "Read environments: $environments"
+          
+          # Read and list LOGIC NAMES (e.g., sit, uat) for grep/selection
+          environments=$(jq -r '.environments[].name | join(" ")' .github/environments.json)
+          echo "Read environments (logic names): $environments"
           echo "environments=$environments" >> $GITHUB_OUTPUT
+          
+          # Save the full JSON config to a file for later lookup (required for mapping)
+          jq -c . .github/environments.json > environments.json
+          echo "config_file_path=environments.json" >> $GITHUB_OUTPUT 
 
       # ----------------------------------------------------------------------
-      # 2. Extract selected environments from the PR Body
+      # 2. Extract selected LOGIC NAMES from the PR Body
       # ----------------------------------------------------------------------
       - name: 📝 Extract Target Environments from PR body
         id: extract
         env:
           PR_BODY: ${{ github.event.pull_request.body }}
-          ENVIRONMENTS: ${{ steps.load-envs.outputs.environments }}
+          ENVIRONMENTS: ${{ steps.load-envs.outputs.environments }} 
         shell: bash
         run: |
           set -e
           body="$PR_BODY"
-          echo "📜 PR body (start): $body 📜 PR body (end)"
           
           CLEAN_ENVIRONMENTS=$(echo "$ENVIRONMENTS" | tr '\n' ' ' | tr -s ' ')
           IFS=' ' read -r -a env_array <<< "$CLEAN_ENVIRONMENTS"
-          selected_branches=()
+          selected_logic_names=()
 
           for env in "${env_array[@]}"; do
-            echo "🔸 Checking for [$env]"
-            # Secure and accurate Regex pattern: searches for a line containing "- [x] env_name"
-            # (\s*): 0 or more spaces
+            echo "🔸 Checking for logic name: [$env]"
+            # Secure Regex pattern: searches for a line containing "- [x] logic_name"
             if echo "$body" | grep -iq "^\s*-\s*\\[x\\]\s*${env}"; then
-              selected_branches+=("$env")
+              selected_logic_names+=("$env")
               echo "   ➡️ Found!"
             fi
           done
 
-          if [ ${#selected_branches[@]} -eq 0 ]; then
-            echo "⚠️ No target branches selected."
-            echo "selected=" >> "$GITHUB_OUTPUT"
+          if [ ${#selected_logic_names[@]} -eq 0 ]; then
+            echo "⚠️ No target environments selected."
+            echo "selected_names=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          echo "✅ Selected branches: ${selected_branches[*]}"
-          echo "selected=${selected_branches[*]}" >> "$GITHUB_OUTPUT"
+          echo "✅ Selected logic names: ${selected_logic_names[*]}"
+          echo "selected_names=${selected_logic_names[*]}" >> "$GITHUB_OUTPUT"
 
       - name: 🛑 Stop if no target branches
-        if: steps.extract.outputs.selected == ''
-        run: echo "⏹️ No target branches selected. Skipping."
+        if: steps.extract.outputs.selected_names == ''
+        run: echo "⏹️ No target environments selected. Skipping."
 
       # ----------------------------------------------------------------------
       # 3. Configure Git and Get Commit SHA
       # ----------------------------------------------------------------------
       - name: 🤖 Configure Git
-        if: steps.extract.outputs.selected != ''
+        if: steps.extract.outputs.selected_names != ''
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
@@ -104,35 +108,48 @@ jobs:
       - name: 🆔 Get Merge Commit SHA
         id: commit
         run: |
-          # The SHA of the merge commit that was just created
           sha=$(git rev-parse HEAD)
           echo "💡 Merge commit SHA: $sha"
           echo "sha=$sha" >> $GITHUB_OUTPUT
 
       # ----------------------------------------------------------------------
-      # 4. Promote Code and Create Automatic PRs
+      # 4. Promote Code (Mapping Logic Name to Physical Branch) & Auto-Merge
       # ----------------------------------------------------------------------
       - name: ➡️ Promote to Selected Environments
-        if: steps.extract.outputs.selected != ''
+        if: steps.extract.outputs.selected_names != '' 
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sha=${{ steps.commit.outputs.sha }}
           base_branch=${{ github.base_ref }}
+          LOGIC_NAMES=${{ steps.extract.outputs.selected_names }}
           
-          # Split environment string into an array
-          IFS=' ' read -r -a branches <<< "${{ steps.extract.outputs.selected }}"
+          # Load the full configuration JSON
+          CONFIG=$(cat environments.json)
           
-          for target_branch in "${branches[@]}"; do
-            echo "🔹 Promoting $base_branch → $target_branch ..."
-            promotion_branch="promote-$base_branch-to-$target_branch-$sha"
+          IFS=' ' read -r -a names_to_promote <<< "$LOGIC_NAMES"
+          
+          for logic_name in "${names_to_promote[@]}"; do
+            
+            # Use jq to lookup the PHYSICAL branch name from the LOGIC name
+            target_branch=$(echo "$CONFIG" | jq -r --arg name "$logic_name" '.environments[] | select(.name == $name) | .branch')
+            
+            if [ -z "$target_branch" ]; then
+                echo "❌ Error: Could not find physical branch for environment '$logic_name'."
+                continue
+            fi
+            
+            echo "🔹 Promoting '$logic_name' (Physical branch: $target_branch)..."
+            
+            # Define branch and title using the LOGIC NAME
+            promotion_branch="promote-$base_branch-to-$logic_name" 
+            PR_TITLE="Promote $base_branch → $logic_name"
 
-            # 1. Fetch and Checkout target branch
+            # 1. Fetch and Checkout the PHYSICAL target branch
             git fetch origin "${target_branch}" 2>/dev/null || echo "⚠️ Warning: Could not fetch ${target_branch}."
-            git checkout -b "${promotion_branch}" origin/"${target_branch}" || git checkout -b "${promotion_branch}" # Fallback
+            git checkout -b "${promotion_branch}" origin/"${target_branch}" || git checkout -b "${promotion_branch}"
 
-            # 2. CHERRY-PICK THE MERGE COMMIT
-            # Use -m 1 to specify the first parent commit as the mainline (base branch)
+            # 2. CHERRY-PICK (Uses the -m 1 flag to handle merge commits)
             if git cherry-pick -m 1 "$sha"; then
                 echo "✅ Cherry-pick succeeded."
             else
@@ -145,13 +162,23 @@ jobs:
             # 3. Push promotion branch
             git push origin "${promotion_branch}" -f
 
-            # 4. Create promotion PR
+            # 4. Create PR and get the PR URL/Number
             echo "📦 Creating promotion PR..."
-            PR_BODY_ONE_LINE=$(echo "### 🚀 Automatic Promotion. The merge commit \`$sha\` from branch \`$base_branch\` has been applied to branch \`$target_branch\`. Please Review and Merge. --- *Automatically generated by GitHub Actions.*")
-            gh pr create \
+            PR_URL=$(gh pr create \
               --base "${target_branch}" \
               --head "${promotion_branch}" \
-              --title "Promote $base_branch → $target_branch" \
-              --body "$PR_BODY_ONE_LINE"
-            echo "✅ PR created."
+              --title "$PR_TITLE" \
+              --body "### 🚀 Automatic Promotion. The merge commit \`$sha\` from branch \`$base_branch\` has been applied to branch \`$target_branch\` (Logic Name: $logic_name). Please Review and Merge. --- *Automatically generated by GitHub Actions.*")
+
+            echo "✅ PR created: $PR_URL"
+            
+            # 5. ATTEMPT AUTO-MERGE (Queues for merge once checks pass)
+            echo "Attempting to auto-merge PR..."
+            gh pr merge "$PR_TITLE" \
+              --repo "${{ github.repository }}" \
+              --squash \
+              --auto 
+            
+            echo "🎉 PR set for auto-merge once checks pass."
+
           done

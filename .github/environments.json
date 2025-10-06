@@ -1,8 +1,20 @@
 {
   "environments": [
-    "sit",
-    "uat",
-    "staging",
-    "production"
+    {
+      "name": "sit",
+      "branch": "sprint_1_sit"
+    },
+    {
+      "name": "uat",
+      "branch": "uat"
+    },
+    {
+      "name": "staging",
+      "branch": "release/staging"
+    },
+    {
+      "name": "production",
+      "branch": "main"
+    }
   ]
 }

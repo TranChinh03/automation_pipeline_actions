@@ -1,14 +1,20 @@
-## 🚀 Mô tả
-
-## ✅ Chọn môi trường cần promote
-Vui lòng đánh dấu (x) vào các môi trường bạn muốn tự động tạo PR sau khi merge:
-
-- [ ] sit
-- [ ] uat
-- [ ] prod
-
-🧠 Ví dụ: Nếu bạn chọn `sit` và `uat`, sau khi merge PR vào `develop`, hệ thống sẽ lần lượt tạo PR vào `sit` rồi `uat`.
+## 🚀 Description
 
 ---
 
-## 📎 Ghi chú thêm (tùy chọn)
+## ✅ Automatic Promotion Targets (CI/CD)
+
+The automated promotion workflow uses **Logic Names** below to find the actual **Git Branch Name** defined in **`.github/environments.json`**.
+
+Please **mark (x)** the target **Logic Names** you want to promote to:
+
+- [ ] sit
+- [ ] uat
+- [ ] staging
+- [ ] production
+
+🧠 **Note**: If your target environment branch name has changed (e.g., from 'sit' to 'sprint_1_sit'), only the **.github/environments.json** file needs to be updated.
+
+---
+
+## 📎 Additional Notes (Optional)
