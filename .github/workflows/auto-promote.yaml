@@ -148,8 +148,8 @@ jobs:
             echo "🔹 Promoting '$logic_name' (Physical branch: $target_branch)..."
             
             # Define branch and title using the LOGIC NAME
-            promotion_branch="promote-$base_branch-to-$logic_name" 
-            PR_TITLE="Promote $base_branch → $logic_name"
+            promotion_branch="promote-$base_branch-to-$logic_name/$sha" 
+            PR_TITLE="Promote $base_branch → $logic_name ($sha)"
 
             # 1. Fetch and Checkout the PHYSICAL target branch
             git fetch origin "${target_branch}" 2>/dev/null || echo "⚠️ Warning: Could not fetch ${target_branch}."
@@ -180,7 +180,7 @@ jobs:
             
             # 5. ATTEMPT AUTO-MERGE (Queues for merge once checks pass)
             echo "Attempting to auto-merge PR..."
-            gh pr merge "$PR_TITLE" \
+            gh pr merge "$PR_URL" \
               --repo "${{ github.repository }}" \
               --squash \
               --auto 
