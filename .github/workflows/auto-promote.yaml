@@ -1,0 +1,157 @@
+# .github/workflows/auto-promote.yaml
+name: 🚀 Auto Promote (Template Driven)
+
+# Triggers when a Pull Request is closed (merged) against the environment branches
+on:
+  pull_request:
+    types: [closed]
+    branches:
+      - dev
+      - sit
+      - uat
+      - staging
+      - production
+
+# Required permissions for the GitHub Actions bot
+permissions:
+  contents: write    # Allows git checkout, cherry-pick, and pushing a new branch
+  pull-requests: write # Allows creation of a new Pull Request
+
+jobs:
+  promote:
+    # Only runs if the closed PR WAS merged
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: ⬇️ Checkout Repository (Full History)
+        uses: actions/checkout@v4
+        with:
+          # Fetch full history to work with target branches
+          fetch-depth: 0
+
+      - name: 🛠️ Install jq & GitHub CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y jq gh
+
+      # ----------------------------------------------------------------------
+      # 1. Load Environment Configuration
+      # ----------------------------------------------------------------------
+      - name: ⚙️ Load Environment Configuration
+        id: load-envs
+        run: |
+          echo "🔍 Loading environment list from .github/environments.json"
+          if [ ! -f ".github/environments.json" ]; then
+            echo "❌ File .github/environments.json does not exist! Please create it."
+            exit 1
+          fi
+          # Read the list of environments (e.g., sit uat staging production)
+          environments=$(jq -r '.environments | join(" ")' .github/environments.json)
+          echo "Read environments: $environments"
+          echo "environments=$environments" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------------------
+      # 2. Extract selected environments from the PR Body
+      # ----------------------------------------------------------------------
+      - name: 📝 Extract Target Environments from PR body
+        id: extract
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          ENVIRONMENTS: ${{ steps.load-envs.outputs.environments }}
+        shell: bash
+        run: |
+          set -e
+          body="$PR_BODY"
+          echo "📜 PR body (start): $body 📜 PR body (end)"
+          
+          CLEAN_ENVIRONMENTS=$(echo "$ENVIRONMENTS" | tr '\n' ' ' | tr -s ' ')
+          IFS=' ' read -r -a env_array <<< "$CLEAN_ENVIRONMENTS"
+          selected_branches=()
+
+          for env in "${env_array[@]}"; do
+            echo "🔸 Checking for [$env]"
+            # Secure and accurate Regex pattern: searches for a line containing "- [x] env_name"
+            # (\s*): 0 or more spaces
+            if echo "$body" | grep -iq "^\s*-\s*\\[x\\]\s*${env}"; then
+              selected_branches+=("$env")
+              echo "   ➡️ Found!"
+            fi
+          done
+
+          if [ ${#selected_branches[@]} -eq 0 ]; then
+            echo "⚠️ No target branches selected."
+            echo "selected=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "✅ Selected branches: ${selected_branches[*]}"
+          echo "selected=${selected_branches[*]}" >> "$GITHUB_OUTPUT"
+
+      - name: 🛑 Stop if no target branches
+        if: steps.extract.outputs.selected == ''
+        run: echo "⏹️ No target branches selected. Skipping."
+
+      # ----------------------------------------------------------------------
+      # 3. Configure Git and Get Commit SHA
+      # ----------------------------------------------------------------------
+      - name: 🤖 Configure Git
+        if: steps.extract.outputs.selected != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: 🆔 Get Merge Commit SHA
+        id: commit
+        run: |
+          # The SHA of the merge commit that was just created
+          sha=$(git rev-parse HEAD)
+          echo "💡 Merge commit SHA: $sha"
+          echo "sha=$sha" >> $GITHUB_OUTPUT
+
+      # ----------------------------------------------------------------------
+      # 4. Promote Code and Create Automatic PRs
+      # ----------------------------------------------------------------------
+      - name: ➡️ Promote to Selected Environments
+        if: steps.extract.outputs.selected != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sha=${{ steps.commit.outputs.sha }}
+          base_branch=${{ github.base_ref }}
+          
+          # Split environment string into an array
+          IFS=' ' read -r -a branches <<< "${{ steps.extract.outputs.selected }}"
+          
+          for target_branch in "${branches[@]}"; do
+            echo "🔹 Promoting $base_branch → $target_branch ..."
+            promotion_branch="promote-$base_branch-to-$target_branch-$sha"
+
+            # 1. Fetch and Checkout target branch
+            git fetch origin "${target_branch}" 2>/dev/null || echo "⚠️ Warning: Could not fetch ${target_branch}."
+            git checkout -b "${promotion_branch}" origin/"${target_branch}" || git checkout -b "${promotion_branch}" # Fallback
+
+            # 2. CHERRY-PICK THE MERGE COMMIT
+            # Use -m 1 to specify the first parent commit as the mainline (base branch)
+            if git cherry-pick -m 1 "$sha"; then
+                echo "✅ Cherry-pick succeeded."
+            else
+                echo "❌ Cherry-pick failed. Attempting cleanup..."
+                git cherry-pick --abort 2>/dev/null || true 
+                echo "⚠️ Automatic promotion skipped due to conflict on ${target_branch}."
+                continue
+            fi
+
+            # 3. Push promotion branch
+            git push origin "${promotion_branch}" -f
+
+            # 4. Create promotion PR
+            echo "📦 Creating promotion PR..."
+            PR_BODY_ONE_LINE=$(echo "### 🚀 Automatic Promotion. The merge commit \`$sha\` from branch \`$base_branch\` has been applied to branch \`$target_branch\`. Please Review and Merge. --- *Automatically generated by GitHub Actions.*")
+            gh pr create \
+              --base "${target_branch}" \
+              --head "${promotion_branch}" \
+              --title "Promote $base_branch → $target_branch" \
+              --body "$PR_BODY_ONE_LINE"
+            echo "✅ PR created."
+          done

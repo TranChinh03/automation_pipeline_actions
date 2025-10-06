@@ -1,0 +1,8 @@
+{
+  "environments": [
+    "sit",
+    "uat",
+    "staging",
+    "production"
+  ]
+}
