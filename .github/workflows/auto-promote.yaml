@@ -48,14 +48,20 @@ jobs:
             exit 1
           fi
           
-          # Read and list LOGIC NAMES (e.g., sit, uat) for grep/selection
-          environments=$(jq -r '.environments[].name | join(" ")' .github/environments.json)
+          # Extract all logic names into a space-separated string
+          environments=$(jq -r '.environments[].name' .github/environments.json | tr '\n' ' ')
+          
+          if [ -z "$environments" ]; then
+            echo "❌ File .github/environments.json trống hoặc không chứa environments hợp lệ!"
+            exit 1
+          fi
+          
           echo "Read environments (logic names): $environments"
           echo "environments=$environments" >> $GITHUB_OUTPUT
-          
+
           # Save the full JSON config to a file for later lookup (required for mapping)
           jq -c . .github/environments.json > environments.json
-          echo "config_file_path=environments.json" >> $GITHUB_OUTPUT 
+          echo "config_file_path=environments.json" >> $GITHUB_OUTPUT
 
       # ----------------------------------------------------------------------
       # 2. Extract selected LOGIC NAMES from the PR Body
