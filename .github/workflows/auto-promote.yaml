@@ -137,7 +137,7 @@ jobs:
           
           for logic_name in "${names_to_promote[@]}"; do
             
-            # Use jq to lookup the PHYSICAL branch name from the LOGIC name
+            # --- 1. Map Logic Name to Physical Branch ---
             target_branch=$(echo "$CONFIG" | jq -r --arg name "$logic_name" '.environments[] | select(.name == $name) | .branch')
             
             if [ -z "$target_branch" ]; then
@@ -147,15 +147,13 @@ jobs:
             
             echo "🔹 Promoting '$logic_name' (Physical branch: $target_branch)..."
             
-            # Define branch and title using the LOGIC NAME
             promotion_branch="promote-$base_branch-to-$logic_name/$sha" 
             PR_TITLE="Promote $base_branch → $logic_name ($sha)"
 
-            # 1. Fetch and Checkout the PHYSICAL target branch
+            # --- 2. Git Operations (Cherry-pick) ---
             git fetch origin "${target_branch}" 2>/dev/null || echo "⚠️ Warning: Could not fetch ${target_branch}."
             git checkout -b "${promotion_branch}" origin/"${target_branch}" || git checkout -b "${promotion_branch}"
 
-            # 2. CHERRY-PICK (Uses the -m 1 flag to handle merge commits)
             if git cherry-pick -m 1 "$sha"; then
                 echo "✅ Cherry-pick succeeded."
             else
@@ -165,10 +163,19 @@ jobs:
                 continue
             fi
 
-            # 3. Push promotion branch
             git push origin "${promotion_branch}" -f
 
-            # 4. Create PR and get the PR URL/Number
+            # --- 3. Check Branch Protection Rules ---
+            PROTECTION_STATUS=$(gh api \
+              "repos/${{ github.repository }}/branches/${target_branch}/protection" \
+              --jq '.required_status_checks.enforcement_level, .required_pull_request_reviews.required_approving_review_count' 2>/dev/null || echo "not_protected")
+              
+            NEEDS_CHECKS=false
+            if [[ "$PROTECTION_STATUS" != "not_protected" && "$PROTECTION_STATUS" != "null" ]]; then
+                NEEDS_CHECKS=true
+            fi
+            
+            # --- 4. Create PR ---
             echo "📦 Creating promotion PR..."
             PR_URL=$(gh pr create \
               --base "${target_branch}" \
@@ -178,13 +185,21 @@ jobs:
 
             echo "✅ PR created: $PR_URL"
             
-            # 5. ATTEMPT AUTO-MERGE (Queues for merge once checks pass)
-            echo "Attempting to auto-merge PR..."
-            gh pr merge "$PR_URL" \
-              --repo "${{ github.repository }}" \
-              --squash \
-              --auto 
-            
-            echo "🎉 PR set for auto-merge once checks pass."
+            # --- 5. Decide Merge Strategy ---
+            if $NEEDS_CHECKS; then
+              echo "🔒 Branch '$target_branch' is protected. Setting up auto-merge queue."
+              gh pr merge "$PR_URL" \
+                --repo "${{ github.repository }}" \
+                --squash \
+                --auto 
+              echo "🎉 PR set for auto-merge once checks pass."
+            else
+              echo "🔓 Branch '$target_branch' is NOT strictly protected. Merging immediately."
+              gh pr merge "$PR_URL" \
+                --repo "${{ github.repository }}" \
+                --squash \
+                --delete-branch
+              echo "✅ PR merged successfully and temporary branch deleted."
+            fi
 
           done
