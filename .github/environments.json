@@ -5,6 +5,10 @@
       "branch": "sprint_1_sit"
     },
     {
+      "name": "sit-testing",
+      "branch": "test"
+    },
+    {
       "name": "uat",
       "branch": "uat"
     },
